@@ -85,11 +85,12 @@ type Raft struct {
 	lastApplied int
 
 	// Volatile state on leaders:
-	nextIndex  []int
-	matchIndex []int
-
-	applyCh   chan ApplyMsg
-	applyCond *sync.Cond
+	nextIndex         []int
+	matchIndex        []int
+	lastIncludedIndex int
+	lastIncludedTerm  int
+	applyCh           chan ApplyMsg
+	applyCond         *sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -118,21 +119,19 @@ func (rf *Raft) persist() {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
 	data := w.Bytes()
-	rf.persister.Save(data, nil)
+	rf.persister.Save(data, rf.persister.snapshot)
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersistRaftstate(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm int
 	var votedFor int
 	var logs Log
-
 	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
 		log.Fatal("failed to read persist\n")
 	} else {
@@ -140,19 +139,35 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.votedFor = votedFor
 		rf.log = logs
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+}
+func (rf *Raft) readPersistSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var lastIncludedIndex int
+	if d.Decode(&lastIncludedIndex) != nil {
+		log.Fatalf("snapshot decode error")
+		return
+	} else {
+		if lastIncludedIndex >= rf.log.Index0 && lastIncludedIndex < rf.log.LastLog.Index {
+			// 裁剪日志：删除快照之前的日志条目
+			rf.lastIncludedIndex = rf.log.at(lastIncludedIndex).Index
+			rf.lastIncludedTerm = rf.log.at(lastIncludedIndex).Term
+			rf.log.truncateFrom(lastIncludedIndex)
+			// // 保存快照和当前的 Raft 状态
+			rf.persist()
+			rf.persister.Save(rf.persister.raftstate, data)
+			rf.lastApplied = lastIncludedIndex
+			rf.commitIndex = lastIncludedIndex
+		} else {
+			rf.lastApplied = rf.log.Index0 - 1
+			rf.commitIndex = rf.log.Index0 - 1
+		}
+
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -161,16 +176,19 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 确保快照的索引有效，并且比当前日志的最早索引更靠后
+	if index >= rf.log.Index0 && index < rf.log.LastLog.Index {
+		// 裁剪日志：删除快照之前的日志条目
+		rf.lastIncludedIndex = rf.log.at(index).Index
+		rf.lastIncludedTerm = rf.log.at(index).Term
+		rf.log.truncateFrom(index)
+		// // 保存快照和当前的 Raft 状态
+		rf.persist()
+		rf.persister.Save(rf.persister.raftstate, snapshot)
+	}
 
-}
-
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -201,7 +219,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.log.append(log)
 	rf.persist()
-	DPrintf("[%v]: term %v Start %v", rf.me, term, log)
 	rf.appendEntries(false)
 
 	return index, term, true
@@ -278,7 +295,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond = sync.NewCond(&rf.mu)
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersistRaftstate(persister.ReadRaftState())
+	rf.readPersistSnapshot(persister.ReadSnapshot())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -288,7 +306,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 func (rf *Raft) apply() {
 	rf.applyCond.Broadcast()
-	DPrintf("[%v]: rf.applyCond.Broadcast()", rf.me)
 }
 
 func (rf *Raft) applier() {
@@ -310,14 +327,13 @@ func (rf *Raft) applier() {
 			rf.mu.Lock()
 		} else {
 			rf.applyCond.Wait()
-			DPrintf("[%v]: rf.applyCond.Wait()", rf.me)
 		}
 	}
 }
 
 func (rf *Raft) commits() string {
 	nums := []string{}
-	for i := 0; i <= rf.lastApplied; i++ {
+	for i := rf.log.Index0; i <= rf.lastApplied; i++ {
 		nums = append(nums, fmt.Sprintf("%4d", rf.log.at(i).Command))
 	}
 	return fmt.Sprint(strings.Join(nums, "|"))

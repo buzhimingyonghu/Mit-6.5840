@@ -20,6 +20,7 @@ type Entry struct {
 func (l *Log) append(entries ...Entry) {
 	l.Entries = append(l.Entries, entries...)
 	l.LastLog = l.Entries[l.len()-1]
+	l.Index0 = l.Entries[0].Index
 }
 
 func makeEmptyLog() Log {
@@ -31,16 +32,25 @@ func makeEmptyLog() Log {
 }
 
 func (l *Log) at(idx int) *Entry {
-	return &l.Entries[idx]
+	return &l.Entries[idx-l.Index0]
 }
 
 func (l *Log) truncate(idx int) {
-	l.Entries = l.Entries[:idx]
+	l.Entries = l.Entries[:idx-l.Index0]
 	l.LastLog = l.Entries[l.len()-1]
 }
-
+func (l *Log) truncateFrom(idx int) {
+	l.Entries = l.Entries[idx+1-l.Index0:]
+	l.Index0 = idx + 1
+	l.LastLog = l.Entries[l.len()-1]
+}
+func (l *Log) replaceIndex0(e Entry) {
+	l.Entries[0] = e
+	l.LastLog = l.Entries[l.len()-1]
+	l.Index0 = e.Index
+}
 func (l *Log) slice(idx int) []Entry {
-	return l.Entries[idx:]
+	return l.Entries[idx-l.Index0:]
 }
 
 func (l *Log) len() int {

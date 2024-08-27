@@ -27,7 +27,6 @@ func (rf *Raft) setNewTerm(term int) {
 		rf.state = Follower
 		rf.currentTerm = term
 		rf.votedFor = -1
-		DPrintf("[%d]: set term %v\n", rf.me, rf.currentTerm)
 		rf.persist()
 	}
 }
@@ -41,7 +40,6 @@ func (rf *Raft) leaderElection() {
 	term := rf.currentTerm
 	voteCounter := 1
 	lastLog := rf.log.LastLog
-	DPrintf("[%v]: start leader election, term %d\n", rf.me, rf.currentTerm)
 	args := RequestVoteArgs{
 		Term:         term,
 		CandidateId:  rf.me,
